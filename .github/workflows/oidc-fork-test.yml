@@ -11,43 +11,25 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - name: Is the OIDC request channel present, and does it issue?
+      - name: Is the OIDC request channel present, and does it issue a token
+        env:
+          EVT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
         run: |
-          echo "event=${{ github.event_name }}"
-          echo "head_repo=${{ github.event.pull_request.head.repo.full_name }}"
-          echo "base_repo=${{ github.repository }}"
-          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
-            echo "OIDC_CHANNEL=present"
-          else
-            echo "OIDC_CHANNEL=absent"
-          fi
-          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
-            echo "OIDC_RTOKEN=present"
-          else
-            echo "OIDC_RTOKEN=absent"
-          fi
-          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
-            code=$(curl -sS -o /tmp/r.json -w '%{http_code}' \
-              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https%3A%2F%2Fgithub.com%2Felastic" || true)
-            echo "OIDC_MINT_HTTP=$code"
-            if [ "$code" = "200" ]; then
-              # print ONLY the subject claim, never the token
-              sub=$(python3 -c "
-import json,base64,sys
-t=json.load(open('/tmp/r.json'))['value'].split('.')[1]
-t+='='*(-len(t)%4)
-print(json.loads(base64.urlsafe_b64decode(t)).get('sub',''))
-")
-              echo "OIDC_SUB=$sub"
-              echo "RESULT=TOKEN_ISSUED_TO_FORK_PR"
-            else
-              echo "RESULT=TOKEN_REFUSED"
-            fi
-          else
-            echo "RESULT=NO_OIDC_CHANNEL_IN_THIS_JOB"
-          fi
-          echo "--- declared vs effective GITHUB_TOKEN permissions ---"
-          curl -sS -o /dev/null -w 'contents read probe: %{http_code}\n' \
-            -H "Authorization: bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}" || true
+          echo "event=$EVT"
+          echo "head_repo=$HEAD_REPO"
+          echo "base_repo=$BASE_REPO"
+          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then echo "OIDC_CHANNEL=present"; else echo "OIDC_CHANNEL=absent"; fi
+          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then echo "OIDC_RTOKEN=present"; else echo "OIDC_RTOKEN=absent"; fi
+          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ] || [ -z "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then echo "RESULT=NO_OIDC_CHANNEL_IN_THIS_JOB"; exit 0; fi
+          code=$(curl -sS -o /tmp/r.json -w '%{http_code}' -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=lab-audience" || true)
+          echo "OIDC_MINT_HTTP=$code"
+          if [ "$code" != "200" ]; then echo "RESULT=TOKEN_REFUSED"; exit 0; fi
+          jwt=$(jq -r '.value' /tmp/r.json)
+          payload=$(printf '%s' "$jwt" | cut -d. -f2)
+          pad=$(( (4 - ${#payload} % 4) % 4 ))
+          if [ "$pad" -gt 0 ]; then payload="${payload}$(head -c "$pad" /dev/zero | tr '\0' '=')"; fi
+          sub=$(printf '%s' "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null | jq -r '.sub')
+          echo "OIDC_SUB=$sub"
+          echo "RESULT=TOKEN_ISSUED_TO_THIS_JOB"
